@@ -912,6 +912,23 @@ class PDFCompressor:
                 self.add_to_log(f"Файл уже обрабатывался ранее: {os.path.basename(file_path)}", "warning")
                 self.update_stats()
                 return
+            
+            # === ДОБАВЬТЕ ЭТУ ПРОВЕРКУ ЗДЕСЬ ===
+            # Проверяем размер файла (минимум 1 МБ = 1024 * 1024 байт)
+            file_size_bytes = os.path.getsize(file_path)
+            min_size_bytes = 1024 * 1024  # 1 МБ
+            
+            if file_size_bytes < min_size_bytes:
+                self.skipped_files += 1
+                file_size_mb = file_size_bytes / (1024 * 1024)
+                self.add_to_log(
+                    f"Пропуск файла (меньше 1 МБ): {os.path.basename(file_path)} " 
+                    f"(размер: {file_size_mb:.2f} МБ)", 
+                    "warning"
+                )
+                self.update_stats()
+                return
+            # === КОНЕЦ ДОБАВЛЕННОГО КОДА ===
 
             # Создаем временный файл для результата
             temp_dir = tempfile.gettempdir()

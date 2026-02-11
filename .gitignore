@@ -1,0 +1,41 @@
+# Byte-code files
+*.pyc
+__pycache__/
+
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+
+# Editor/IDE-specific files
+# VS Code
+.vscode/
+# PyCharm
+.idea/ 
+
+
+# Distribution / packaging
+.Python
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Logs and databases
+*.log
+*.sqlite3
+*.db
+
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# txt files
+*.txt
+
+# excel-files
+*.xlsx

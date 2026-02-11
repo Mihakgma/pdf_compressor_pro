@@ -1,4 +1,5 @@
 # crud/operations.py
+
 import os
 
 from sqlalchemy.orm import Session
@@ -62,8 +63,8 @@ class DBOperations:
             compression_method_id: int,
             compression_min_boundary: int,
             procession_timeout: int,
-            timeout_iterations: int,  # ДОБАВИТЬ
-            timeout_interval_secs: int  # ДОБАВИТЬ
+            timeout_iterations: int,
+            timeout_interval_secs: int
     ) -> Optional[Setting]:
         return self.db.query(Setting).filter(
             and_(
@@ -73,8 +74,8 @@ class DBOperations:
                 Setting.compression_method_id == compression_method_id,
                 Setting.compression_min_boundary == compression_min_boundary,
                 Setting.procession_timeout == procession_timeout,
-                Setting.timeout_iterations == timeout_iterations,  # ДОБАВИТЬ
-                Setting.timeout_interval_secs == timeout_interval_secs  # ДОБАВИТЬ
+                Setting.timeout_iterations == timeout_iterations,
+                Setting.timeout_interval_secs == timeout_interval_secs
             )
         ).first()
 
@@ -178,6 +179,9 @@ class DBOperations:
     def get_all_compression_methods(self) -> List[CompressionMethod]:
         return self.db.query(CompressionMethod).all()
 
+    def get_compression_method_by_id(self, method_id: int) -> Optional[CompressionMethod]:
+        return self.db.query(CompressionMethod).filter(CompressionMethod.id == method_id).first()
+
     # Инициализация базовых данных
     def initialize_base_data(self):
         # Создаем причины ошибок
@@ -186,7 +190,7 @@ class DBOperations:
              "info": "Файл был пропущен, так как размер после сжатия увеличился"},
             {"name": "превышен таймаут обработки файла",
              "info": "Обработка файла заняла больше времени, чем установленный таймаут"},
-            {"name": "прочая причина", "info": "Другие причины ошибок при обработке файла"}
+            {"name": "прочая причина", "info": "Другие причины ошибок при обработки файла"}
         ]
 
         for reason_data in fail_reasons:
@@ -201,12 +205,29 @@ class DBOperations:
                 depth = NestingDepth(id=i, name=name)
                 self.db.add(depth)
 
-        # Создаем методы сжатия
-        method_names = ["Ghostscript", "Стандартное", "Только изображения"]
-        for i, name in enumerate(method_names, 1):
-            if not self.db.query(CompressionMethod).filter(CompressionMethod.name == name).first():
-                method = CompressionMethod(name=name)
+        # Создаем методы сжатия с OCR-флагами
+        method_data = [
+            {"id": 1, "name": "Ghostscript", "description": "Профессиональное сжатие PDF", "is_ocr_enabled": False},
+            {"id": 2, "name": "Стандартное", "description": "Базовое сжатие", "is_ocr_enabled": False},
+            {"id": 3, "name": "Только изображения", "description": "Оптимизация только изображений", "is_ocr_enabled": False},
+            {"id": 4, "name": "Tesseract OCR", "description": "Распознавание текста и создание поискового PDF", "is_ocr_enabled": True},
+            {"id": 5, "name": "Tesseract + Ghostscript", "description": "OCR + последующее сжатие", "is_ocr_enabled": True},
+        ]
+        
+        for method_info in method_data:
+            existing_method = self.db.query(CompressionMethod).filter(CompressionMethod.id == method_info["id"]).first()
+            if not existing_method:
+                method = CompressionMethod(
+                    id=method_info["id"],
+                    name=method_info["name"],
+                    description=method_info["description"],
+                    is_ocr_enabled=method_info["is_ocr_enabled"]
+                )
                 self.db.add(method)
+            else:
+                # Обновляем существующий метод
+                existing_method.description = method_info["description"]
+                existing_method.is_ocr_enabled = method_info["is_ocr_enabled"]
 
         self.db.commit()
 
@@ -219,8 +240,8 @@ class DBOperations:
                 compression_method_id=1,
                 compression_min_boundary=1024,
                 procession_timeout=35,
-                timeout_iterations=350,  # ДОБАВИТЬ
-                timeout_interval_secs=9,  # ДОБАВИТЬ
+                timeout_iterations=350,
+                timeout_interval_secs=9,
                 info="Настройка по умолчанию",
                 activate=True
             )
@@ -305,3 +326,4 @@ class DBOperations:
             print(f"  {path}: {count} записей")
 
         return len(duplicates) == 0
+    

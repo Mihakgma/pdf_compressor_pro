@@ -14,9 +14,17 @@ import traceback
 
 # Импорты для работы с БД
 from models.database import get_db, create_tables
-from models.models import ProcessedFile
+from models.models import ProcessedFile, CompressionMethod
 from crud.operations import DBOperations
 from stats_window import StatsWindow
+
+# Импорт OCR процессора
+try:
+    from ocr_processor import OCRProcessor
+    OCR_SUPPORT = True
+except ImportError:
+    OCR_SUPPORT = False
+    print("OCRProcessor не доступен. OCR методы будут отключены.")
 
 
 class PDFCompressor:
@@ -38,14 +46,18 @@ class PDFCompressor:
         self.directory_path = tk.StringVar()
         self.depth_level = tk.IntVar(value=self.active_setting.nesting_depth_id if self.active_setting else 4)
         self.replace_original = tk.BooleanVar(
-            value=self.active_setting.need_replace if self.active_setting else True)  # По умолчанию True
+            value=self.active_setting.need_replace if self.active_setting else True)
         self.compression_level = tk.IntVar(value=self.active_setting.compression_level if self.active_setting else 2)
-        self.compression_method = tk.StringVar(value="ghostscript")  # Будет сопоставлено с БД
+        self.compression_method_id = tk.IntVar(value=self.active_setting.compression_method_id if self.active_setting else 1)
         self.min_saving_threshold = tk.IntVar(
             value=self.active_setting.compression_min_boundary if self.active_setting else 1024)
         self.file_timeout = tk.IntVar(value=self.active_setting.procession_timeout if self.active_setting else 35)
         self.timeout_iterations = tk.IntVar(value=self.active_setting.timeout_iterations if self.active_setting else 350)
         self.timeout_interval_secs = tk.IntVar(value=self.active_setting.timeout_interval_secs if self.active_setting else 9)
+
+        # Инициализация OCR процессора - ОТЛОЖЕННАЯ
+        self.ocr_processor = None
+        self.ocr_available = False
 
         # Переменные для управления потоком
         self.currently_processing = False
@@ -85,9 +97,74 @@ class PDFCompressor:
         # Кнопка управления настройками
         self.settings_button = ttk.Button(self.root, text="Управление настройками", command=self.manage_settings)
 
+        # Комбобокс для методов сжатия
+        self.method_combo = None
+        self.method_desc_label = None
+
         self.setup_ui()
         self.check_ghostscript()
+        self.check_tools()  # Теперь OCR инициализируется здесь
         self.check_log_files()
+
+    def check_tools(self):
+        """Проверяет наличие всех необходимых инструментов"""
+        gs_ok = self.check_ghostscript()
+        
+        # Инициализируем OCRProcessor только после создания UI
+        if OCR_SUPPORT and self.ocr_processor is None:
+            try:
+                self.ocr_processor = OCRProcessor(self.db_ops, self.add_to_log)
+                self.ocr_available = self.ocr_processor.ocr_available
+            except Exception as e:
+                self.add_to_log(f"Ошибка инициализации OCR: {e}", "warning")
+                self.ocr_available = False
+        elif not OCR_SUPPORT:
+            self.ocr_available = False
+            self.add_to_log("OCR модули не установлены. OCR методы будут отключены.", "warning")
+        
+        # Обновляем доступность методов в UI
+        self.update_methods_availability()
+        
+        return gs_ok or self.ocr_available
+
+    def update_methods_availability(self):
+        """Обновляет доступность методов сжатия в UI"""
+        if not self.method_combo:
+            return
+            
+        # Получаем все методы
+        methods = self.db_ops.get_all_compression_methods()
+        combo_values = list(self.method_combo['values'])
+        
+        # Создаем новые значения с индикаторами доступности
+        new_values = []
+        for method in methods:
+            ocr_mark = " (OCR)" if method.is_ocr_enabled else ""
+            available = True
+            
+            # Проверяем доступность OCR методов
+            if method.is_ocr_enabled and not self.ocr_available:
+                available = False
+                ocr_mark = " (OCR - НЕ ДОСТУПЕН)"
+            
+            method_text = f"{method.id}: {method.name}{ocr_mark}"
+            new_values.append(method_text)
+            
+            # Если метод недоступен, делаем его неактивным
+            # (в стандартном ttk.Combobox нет прямой поддержки disabled items,
+            # но мы можем предотвратить выбор)
+        
+        self.method_combo['values'] = new_values
+        
+        # Устанавливаем первый доступный метод
+        current_value = self.method_combo.get()
+        if not current_value or "(OCR - НЕ ДОСТУПЕН)" in current_value:
+            for value in new_values:
+                if "(OCR - НЕ ДОСТУПЕН)" not in value:
+                    self.method_combo.set(value)
+                    break
+        
+        self.on_method_changed()
 
     def manage_settings(self):
         """Окно управления настройками"""
@@ -122,8 +199,8 @@ class PDFCompressor:
                 f"Замена={setting.need_replace}, Ур.сжатия={setting.compression_level}, "
                 f"Метод={setting.compression_method.name}, Порог={setting.compression_min_boundary}Б, "
                 f"Таймаут={setting.procession_timeout} "
-                f"Итерации={setting.timeout_iterations}шт, "  # ДОБАВИТЬ
-                f"Пауза={setting.timeout_interval_secs}с"  # ДОБАВИТЬ
+                f"Итерации={setting.timeout_iterations}шт, "
+                f"Пауза={setting.timeout_interval_secs}с"
                 f"{active_indicator}"
             )
 
@@ -171,16 +248,24 @@ class PDFCompressor:
 
         def create_new_setting():
             try:
+                # Получаем выбранный метод
+                selected_method = self.method_combo.get()
+                if not selected_method:
+                    messagebox.showerror("Ошибка", "Выберите метод сжатия!")
+                    return
+                    
+                method_id = int(selected_method.split(':')[0])
+                
                 # Создание новой настройки на основе текущих значений UI
                 new_setting = self.db_ops.create_setting(
                     nesting_depth_id=self.depth_level.get(),
                     need_replace=self.replace_original.get(),
                     compression_level=self.compression_level.get(),
-                    compression_method_id=1,  # Ghostscript
+                    compression_method_id=method_id,
                     compression_min_boundary=self.min_saving_threshold.get(),
                     procession_timeout=self.file_timeout.get(),
-                    timeout_iterations=self.timeout_iterations.get(),  # ДОБАВИТЬ
-                    timeout_interval_secs=self.timeout_interval_secs.get(),  # ДОБАВИТЬ
+                    timeout_iterations=self.timeout_iterations.get(),
+                    timeout_interval_secs=self.timeout_interval_secs.get(),
                     info=f"Создано {datetime.now().strftime('%d.%m.%Y %H:%M')}",
                     activate=True
                 )
@@ -236,16 +321,24 @@ class PDFCompressor:
             self.compression_level.set(self.active_setting.compression_level)
             self.min_saving_threshold.set(self.active_setting.compression_min_boundary)
             self.file_timeout.set(self.active_setting.procession_timeout)
-            self.timeout_iterations.set(self.active_setting.timeout_iterations)  # ДОБАВИТЬ
-            self.timeout_interval_secs.set(self.active_setting.timeout_interval_secs)  # ДОБАВИТЬ
+            self.timeout_iterations.set(self.active_setting.timeout_iterations)
+            self.timeout_interval_secs.set(self.active_setting.timeout_interval_secs)
+            
+            # Обновляем комбобокс метода сжатия
+            if self.method_combo:
+                methods = self.db_ops.get_all_compression_methods()
+                for method in methods:
+                    if method.id == self.active_setting.compression_method_id:
+                        ocr_mark = " (OCR)" if method.is_ocr_enabled else ""
+                        self.method_combo.set(f"{method.id}: {method.name}{ocr_mark}")
+                        break
 
     def skip_current_file(self):
         """Пропускает текущий обрабатываемый файл"""
-        pass
-        # if self.currently_processing and self.current_file_path:
-        #     self.stop_current_file = True
-        #     self.add_to_log(f"Пропуск файла по требованию пользователя: {os.path.basename(self.current_file_path)}",
-        #                     "warning")
+        if self.currently_processing and self.current_file_path:
+            self.stop_current_file = True
+            self.add_to_log(f"Пропуск файла по требованию пользователя: {os.path.basename(self.current_file_path)}",
+                            "warning")
 
     def setup_log_file(self):
         """Создает или выбирает файл для логирования"""
@@ -335,6 +428,41 @@ class PDFCompressor:
         self.add_to_log("⚠️  Ghostscript не найден! Установите его для работы программы", "warning")
         return False
 
+    def on_method_changed(self, event=None):
+        """Обновляет описание выбранного метода сжатия"""
+        if not self.method_combo:
+            return
+            
+        selected = self.method_combo.get()
+        if selected:
+            try:
+                method_id = int(selected.split(':')[0])
+                method = self.db_ops.get_compression_method_by_id(method_id)
+                
+                if method:
+                    description = method.description or ""
+                    
+                    # Добавляем предупреждение для недоступных OCR методов
+                    if method.is_ocr_enabled and not self.ocr_available:
+                        description += " ⚠️ Tesseract не найден или не установлены зависимости!"
+                        self.method_desc_label.config(foreground="orange")
+                    else:
+                        self.method_desc_label.config(foreground="gray")
+                    
+                    self.method_desc_label.config(text=description)
+                    
+                    # Отключаем/включаем уровень сжатия в зависимости от метода
+                    if method_id in [4, 5]:  # OCR методы
+                        # Для Tesseract+Ghostscript оставляем уровень сжатия
+                        if method_id == 5:
+                            self.compression_level.set(2)  # Стандартный уровень для комбинированного метода
+                    else:
+                        # Для не-OCR методов используем сохраненное значение
+                        if self.active_setting:
+                            self.compression_level.set(self.active_setting.compression_level)
+            except ValueError:
+                pass
+
     def setup_ui(self):
         # Основной фрейм
         main_frame = ttk.Frame(self.root, padding="10")
@@ -377,19 +505,44 @@ class PDFCompressor:
             fill=tk.X)
         ttk.Label(compression_frame, textvariable=self.compression_level).pack()
 
-        # Метод сжатия
+        # Метод сжатия - обновленная версия
         ttk.Label(main_frame, text="Метод сжатия:").grid(row=4, column=0, sticky=tk.W, pady=5)
+        
+        # Получаем все методы из БД
+        methods = self.db_ops.get_all_compression_methods()
         method_frame = ttk.Frame(main_frame)
-        method_frame.grid(row=4, column=1, sticky=(tk.W, tk.E), pady=5)
-
-        methods = [
-            ("Ghostscript (рекомендуется)", "ghostscript"),
-            ("Стандартное", "standard"),
-            ("Только изображения", "images_only")
-        ]
-
-        for text, value in methods:
-            ttk.Radiobutton(method_frame, text=text, variable=self.compression_method, value=value).pack(side=tk.LEFT)
+        method_frame.grid(row=4, column=1, sticky=(tk.W, tk.E), pady=5, columnspan=2)
+        
+        # Создаем выпадающий список
+        self.method_combo = ttk.Combobox(method_frame, state="readonly", width=50)
+        self.method_combo.grid(row=0, column=0, sticky=(tk.W, tk.E))
+        
+        # Заполняем значения
+        method_values = []
+        for method in methods:
+            ocr_mark = " (OCR)" if method.is_ocr_enabled else ""
+            method_values.append(f"{method.id}: {method.name}{ocr_mark}")
+        
+        self.method_combo['values'] = method_values
+        
+        # Устанавливаем активный метод или первый доступный
+        if self.active_setting:
+            for method in methods:
+                if method.id == self.active_setting.compression_method_id:
+                    ocr_mark = " (OCR)" if method.is_ocr_enabled else ""
+                    self.method_combo.set(f"{method.id}: {method.name}{ocr_mark}")
+                    break
+        
+        if not self.method_combo.get() and method_values:
+            self.method_combo.set(method_values[0])
+        
+        # Добавляем описание метода
+        self.method_desc_label = ttk.Label(method_frame, text="", foreground="gray", wraplength=600)
+        self.method_desc_label.grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
+        
+        # Привязываем событие изменения выбора
+        self.method_combo.bind('<<ComboboxSelected>>', self.on_method_changed)
+        self.on_method_changed()  # Инициализация
 
         # Порог минимального сжатия
         ttk.Label(main_frame, text="Минимальное сжатие (Б):").grid(row=5, column=0, sticky=tk.W, pady=5)
@@ -453,33 +606,33 @@ class PDFCompressor:
         ttk.Label(interval_frame, text="сек (1-60)").pack(side=tk.LEFT, padx=5)
 
         # Кнопка запуска
-        ttk.Button(main_frame, text="Начать сжатие", command=self.start_compression).grid(row=7, column=0, columnspan=3,
+        ttk.Button(main_frame, text="Начать сжатие", command=self.start_compression).grid(row=9, column=0, columnspan=3,
                                                                                           pady=10)
 
         # Кнопка открытия папки с логами
-        ttk.Button(main_frame, text="Открыть папку с журналами", command=self.open_logs_folder).grid(row=7, column=2,
+        ttk.Button(main_frame, text="Открыть папку с журналами", command=self.open_logs_folder).grid(row=9, column=2,
                                                                                                      pady=10,
                                                                                                      sticky=tk.E)
-        # Кнопка инструкции (ДОБАВЛЕНО)
+        # Кнопка инструкции
         ttk.Button(main_frame, text="📖 ИНСТРУКЦИЯ",
-                   command=self.show_instructions).grid(row=8, column=0, pady=10, sticky=tk.W)
+                   command=self.show_instructions).grid(row=10, column=0, pady=10, sticky=tk.W)
         ttk.Button(main_frame, text="Статистика сжатия",
-                   command=self.show_stats).grid(row=8, column=1, pady=10)
+                   command=self.show_stats).grid(row=10, column=1, pady=10)
 
         # Кнопка управления настройками
-        self.settings_button.grid(row=8, column=2, pady=10, sticky=tk.E)
+        self.settings_button.grid(row=10, column=2, pady=10, sticky=tk.E)
 
         # Кнопка пропуска файла
-        self.skip_button.grid(row=8, column=0, columnspan=2, pady=5)
+        self.skip_button.grid(row=11, column=0, columnspan=2, pady=5)
 
         # Журнал операций
-        ttk.Label(main_frame, text="Журнал операций:").grid(row=9, column=0, sticky=tk.W, pady=5)
-        self.log_text.grid(row=10, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
-        self.log_scrollbar.grid(row=10, column=3, sticky=(tk.N, tk.S), pady=5)
+        ttk.Label(main_frame, text="Журнал операций:").grid(row=12, column=0, sticky=tk.W, pady=5)
+        self.log_text.grid(row=13, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        self.log_scrollbar.grid(row=13, column=3, sticky=(tk.N, tk.S), pady=5)
 
         # Статистика
         stats_frame = ttk.Frame(main_frame)
-        stats_frame.grid(row=11, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        stats_frame.grid(row=14, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
 
         # Правильное создание меток статистики
         ttk.Label(stats_frame, text="Обработано:").grid(row=0, column=0, padx=5)
@@ -497,13 +650,14 @@ class PDFCompressor:
         ttk.Label(stats_frame, text="Степень сжатия:").grid(row=0, column=8, padx=5)
         self.ratio_label.grid(row=0, column=9, padx=5)
 
-        # Информация о Ghostscript
-        info_label = ttk.Label(main_frame, text="Для работы программы требуется установленный Ghostscript",
-                               foreground="blue")
-        info_label.grid(row=12, column=0, columnspan=3, pady=5)
+        # Информация о инструментах
+        info_label = ttk.Label(main_frame, 
+                              text="Для работы программы требуется установленный Ghostscript. Для OCR методов также нужен Tesseract.",
+                              foreground="blue")
+        info_label.grid(row=15, column=0, columnspan=3, pady=5)
 
         # Настройка весов для растягивания
-        main_frame.rowconfigure(10, weight=1)
+        main_frame.rowconfigure(13, weight=1)
 
     def open_logs_folder(self):
         """Открывает папку с логами в проводнике"""
@@ -609,7 +763,7 @@ class PDFCompressor:
 
             # Настройки сжатия в зависимости от уровня
             if compression_level == 1:
-                # Экономне сжатие
+                # Экономное сжатие
                 settings = [
                     '-dPDFSETTINGS=/screen',
                     '-dDownsampleColorImages=true',
@@ -682,32 +836,63 @@ class PDFCompressor:
                 self.add_to_log(f"Ошибка удаления временных файлов: {e}", "warning")
 
     def compress_pdf(self, input_path, output_path):
-        """Основная функция сжатия PDF"""
+        """Основная функция сжатия PDF с поддержкой OCR"""
         try:
-            # Получаем размер исходного файла
             original_size = os.path.getsize(input_path)
-
-            # Сжимаем файл
-            success = self.compress_with_ghostscript(input_path, output_path, self.compression_level.get())
-
+            
+            # Определяем выбранный метод сжатия
+            selected_method = self.method_combo.get()
+            if not selected_method:
+                self.add_to_log("Метод сжатия не выбран!", "error")
+                return False, 0
+                
+            method_id = int(selected_method.split(':')[0])
+            
+            success = False
+            saving = 0
+            
+            # Выбираем метод обработки
+            if method_id == 4:  # Tesseract OCR
+                if not self.ocr_available:
+                    self.add_to_log("OCR недоступен. Установите Tesseract и зависимости.", "error")
+                    return False, 0
+                    
+                success = self.ocr_processor.process_with_tesseract(input_path, output_path)
+                
+            elif method_id == 5:  # Tesseract + Ghostscript
+                if not self.ocr_available:
+                    self.add_to_log("OCR недоступен. Установите Tesseract и зависимости.", "error")
+                    return False, 0
+                    
+                success = self.ocr_processor.process_with_tesseract_and_ghostscript(
+                    input_path, 
+                    output_path,
+                    self.compression_level.get()
+                )
+                
+            elif method_id in [1, 2, 3]:  # Стандартные методы Ghostscript
+                success = self.compress_with_ghostscript(input_path, output_path, self.compression_level.get())
+                
+            else:
+                self.add_to_log(f"Неизвестный метод сжатия: {method_id}", "error")
+                return False, 0
+            
             if success:
-                # Получаем размер сжатого файла
                 compressed_size = os.path.getsize(output_path)
-
-                # Проверяем, достигли ли мы минимального порога сжатия
                 saving = original_size - compressed_size
                 min_saving = self.min_saving_threshold.get()
-
+                
                 if saving >= min_saving:
                     return True, saving
                 else:
                     self.add_to_log(
                         f"Сжатие недостаточно: {saving} Б < {min_saving} Б (порог). Файл не будет заменен.",
-                        "warning")
+                        "warning"
+                    )
                     return False, saving
             else:
                 return False, 0
-
+                
         except Exception as e:
             self.add_to_log(f"Ошибка сжатия PDF: {e}", "error")
             return False, 0
@@ -764,10 +949,17 @@ class PDFCompressor:
                 self.total_compressed_size += os.path.getsize(file_path)
 
                 # Сохраняем в БД
+                selected_method = self.method_combo.get()
+                method_id = int(selected_method.split(':')[0]) if selected_method else 1
+                
+                # Получаем активные настройки
+                active_setting = self.db_ops.get_active_setting()
+                setting_id = active_setting.id if active_setting else 1
+
                 self.db_ops.create_processed_file(
                     file_full_path=file_path,
                     is_successful=True,
-                    setting_id=self.active_setting.id,
+                    setting_id=setting_id,
                     file_compression_kbites=saving / 1024
                 )
 
@@ -790,10 +982,13 @@ class PDFCompressor:
                     other_fail_reason = traceback.format_exc()
 
                 # Сохраняем в БД
+                active_setting = self.db_ops.get_active_setting()
+                setting_id = active_setting.id if active_setting else 1
+
                 self.db_ops.create_processed_file(
                     file_full_path=file_path,
                     is_successful=False,
-                    setting_id=self.active_setting.id,
+                    setting_id=setting_id,
                     file_compression_kbites=0.0,
                     fail_reason_id=fail_reason.id if fail_reason else None,
                     other_fail_reason=other_fail_reason
@@ -811,10 +1006,13 @@ class PDFCompressor:
 
             # Сохраняем в БД с прочей причиной
             fail_reason = self.db_ops.get_fail_reason_by_name("прочая причина")
+            active_setting = self.db_ops.get_active_setting()
+            setting_id = active_setting.id if active_setting else 1
+
             self.db_ops.create_processed_file(
                 file_full_path=file_path,
                 is_successful=False,
-                setting_id=self.active_setting.id,
+                setting_id=setting_id,
                 file_compression_kbites=0.0,
                 fail_reason_id=fail_reason.id if fail_reason else None,
                 other_fail_reason=traceback.format_exc()
@@ -859,6 +1057,24 @@ class PDFCompressor:
             messagebox.showerror("Ошибка", "Указанная директория не существует")
             return
 
+        # Проверяем выбранный метод
+        selected_method = self.method_combo.get()
+        if not selected_method:
+            messagebox.showerror("Ошибка", "Выберите метод сжатия")
+            return
+            
+        method_id = int(selected_method.split(':')[0])
+        
+        # Проверяем доступность OCR методов
+        if method_id in [4, 5] and not self.ocr_available:
+            messagebox.showerror("Ошибка", 
+                "OCR методы недоступны.\n\n"
+                "Установите:\n"
+                "1. pip install pytesseract pdf2image PyPDF2 Pillow\n"
+                "2. apt install tesseract-ocr tesseract-ocr-rus poppler-utils\n"
+                "3. Проверьте установку Tesseract: tesseract --version")
+            return
+
         # Обновляем активные настройки
         self.load_active_settings()
 
@@ -889,6 +1105,10 @@ class PDFCompressor:
 
             self.add_to_log(f"Начало обработки директории: {directory}")
             self.add_to_log(f"Глубина вложенности: {depth}")
+            
+            # Показываем выбранный метод
+            selected_method = self.method_combo.get()
+            self.add_to_log(f"Метод сжатия: {selected_method}")
 
             # Находим все PDF файлы
             pdf_files = self.find_pdf_files(directory, depth)
@@ -899,8 +1119,8 @@ class PDFCompressor:
             # Обрабатываем каждый файл
             counter = 0
             for i, file_path in enumerate(pdf_files, 1):
-                if counter % self.timeout_iterations.get() == 0:  # ИЗМЕНИТЬ
-                    time.sleep(self.timeout_interval_secs.get())  # ИЗМЕНИТЬ
+                if counter % self.timeout_iterations.get() == 0:
+                    time.sleep(self.timeout_interval_secs.get())
                 counter += 1
                 if self.stop_current_file:
                     break
@@ -931,6 +1151,7 @@ class PDFCompressor:
     
         🎯 ОСНОВНЫЕ ВОЗМОЖНОСТИ:
         • Интеллектуальное сжатие PDF файлов с помощью Ghostscript
+        • OCR обработка с помощью Tesseract (распознавание текста в сканах)
         • Обработка отдельных файлов и целых папок
         • Гибкие настройки сжатия с сохранением пресетов
         • Полная история обработки в базе данных
@@ -943,6 +1164,13 @@ class PDFCompressor:
            • Программа автоматически найдет все PDF файлы в выбранной директории
     
         2. НАСТРОЙКА ПАРАМЕТРОВ:
+    
+           МЕТОД СЖАТИЯ (ВЫБЕРИТЕ ИЗ СПИСКА):
+           • Ghostscript - профессиональное сжатие (рекомендуется для обычных PDF)
+           • Стандартное - базовое сжатие
+           • Только изображения - оптимизация изображений в PDF
+           • Tesseract OCR - создание поисковых PDF из сканов (нужен Tesseract)
+           • Tesseract + Ghostscript - OCR + последующее сжатие (нужен Tesseract)
     
            ГЛУБИНА ВЛОЖЕННОСТИ:
            • "Только текущая" - обрабатывает файлы только в выбранной папке
@@ -958,11 +1186,6 @@ class PDFCompressor:
            • 1 (Экономный) - максимальное сжатие, подходит для веб-публикаций
            • 2 (Стандартный) - баланс качества и размера (рекомендуется)
            • 3 (Максимальный) - лучшее качество, умеренное сжатие
-    
-           МЕТОД СЖАТИЯ:
-           • Ghostscript - профессиональный метод сжатия (рекомендуется)
-           • Стандартное - базовое сжатие
-           • Только изображения - оптимизация только изображений в PDF
     
            МИНИМАЛЬНОЕ СЖАТИЕ (Б):
            • Укажите минимальный размер экономии в байтах
@@ -990,6 +1213,30 @@ class PDFCompressor:
            • Используйте "Пропустить файл" если обработка зависла
            • Статистика отображается в реальном времени
     
+        🆕 OCR-ФУНКЦИИ (ТЕССЕРАКТ):
+    
+        ДЛЯ ИСПОЛЬЗОВАНИЯ OCR МЕТОДОВ УСТАНОВИТЕ:
+    
+        1. Tesseract OCR:
+           • Linux: sudo apt install tesseract-ocr tesseract-ocr-rus poppler-utils
+           • Windows: Скачайте с https://github.com/UB-Mannheim/tesseract/wiki
+           • Mac: brew install tesseract tesseract-lang
+    
+        2. Python библиотеки:
+           pip install pytesseract pdf2image PyPDF2 Pillow
+    
+        🎯 КОГДА ИСПОЛЬЗОВАТЬ OCR:
+        • Для отсканированных документов без текстового слоя
+        • Для старых сканов, которые нужно сделать поисковыми
+        • Когда важна возможность поиска текста в PDF
+        • Для автоматизации обработки больших архивов сканов
+    
+        ⚠️ ВАЖНЫЕ ЗАМЕЧАНИЯ ПО OCR:
+        • OCR-обработка требует больше времени и ресурсов
+        • Для больших файлов увеличьте таймаут обработки
+        • Убедитесь, что Tesseract установлен для использования OCR-методов
+        • Проверьте доступность языковых пакетов (rus, eng)
+    
         ⚙️ ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ:
     
         УПРАВЛЕНИЕ НАСТРОЙКАМИ:
@@ -1011,6 +1258,7 @@ class PDFCompressor:
         🔧 ТЕХНИЧЕСКИЕ ТРЕБОВАНИЯ:
     
         • Установленный Ghostscript (проверяется автоматически)
+        • Для OCR: Tesseract OCR и зависимости
         • Python 3.8 или новее
         • Права доступа к обрабатываемым файлам
         • Для сетевых путей - права администратора
@@ -1030,7 +1278,7 @@ class PDFCompressor:
     
         • Журналы работы сохраняются в папке logs/
         • Для диагностики проблем используйте журналы операций
-        • Проверьте установку Ghostscript при возникновении ошибок
+        • Проверьте установку Ghostscript и Tesseract при возникновении ошибок
     
         Для начала работы выберите директорию и нажмите "Начать сжатие"!
                 """

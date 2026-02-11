@@ -29,6 +29,8 @@ class CompressionMethod(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), nullable=False)
+    description = Column(Text, nullable=True)  # ДОБАВИТЬ описание метода
+    is_ocr_enabled = Column(Boolean, default=False)  # ДОБАВИТЬ флаг OCR
 
     settings = relationship("Setting", back_populates="compression_method")
 

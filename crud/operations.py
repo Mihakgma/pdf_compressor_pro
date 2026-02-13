@@ -33,18 +33,22 @@ class DBOperations:
             setting_id: int,
             file_compression_kbites: float = 0.0,
             fail_reason_id: Optional[int] = None,
-            other_fail_reason: Optional[str] = None
+            other_fail_reason: Optional[str] = None,
+            file_pages: Optional[int] = None,  # ✅ НОВОЕ
+            file_origin_size_kbytes: Optional[float] = None  # ✅ НОВОЕ
     ) -> ProcessedFile:
         # Нормализуем путь перед сохранением
         normalized_path = self.normalize_path(file_full_path)
 
         processed_file = ProcessedFile(
-            file_full_path=normalized_path,  # Сохраняем нормализованный путь
+            file_full_path=normalized_path,
             is_successful=is_successful,
             fail_reason_id=fail_reason_id,
             setting_id=setting_id,
             file_compression_kbites=file_compression_kbites,
-            other_fail_reason=other_fail_reason
+            other_fail_reason=other_fail_reason,
+            file_pages=file_pages,  # ✅ НОВОЕ
+            file_origin_size_kbytes=file_origin_size_kbytes  # ✅ НОВОЕ
         )
         self.db.add(processed_file)
         self.db.commit()
@@ -65,9 +69,10 @@ class DBOperations:
             procession_timeout: int,
             timeout_iterations: int,
             timeout_interval_secs: int,
-            ocr_max_pages: int  # ✅ ДОБАВЛЕНО
+            ocr_max_pages: int,
+            kbytes_per_page_border: Optional[float] = None  # ✅ НОВОЕ
     ) -> Optional[Setting]:
-        return self.db.query(Setting).filter(
+        query = self.db.query(Setting).filter(
             and_(
                 Setting.nesting_depth_id == nesting_depth_id,
                 Setting.need_replace == need_replace,
@@ -77,9 +82,17 @@ class DBOperations:
                 Setting.procession_timeout == procession_timeout,
                 Setting.timeout_iterations == timeout_iterations,
                 Setting.timeout_interval_secs == timeout_interval_secs,
-                Setting.ocr_max_pages == ocr_max_pages  # ✅ ДОБАВЛЕНО
+                Setting.ocr_max_pages == ocr_max_pages
             )
-        ).first()
+        )
+        
+        # Обрабатываем NULL для kbytes_per_page_border
+        if kbytes_per_page_border is None:
+            query = query.filter(Setting.kbytes_per_page_border.is_(None))
+        else:
+            query = query.filter(Setting.kbytes_per_page_border == kbytes_per_page_border)
+            
+        return query.first()
 
     def create_setting(
             self,
@@ -91,11 +104,12 @@ class DBOperations:
             procession_timeout: int = 35,
             timeout_iterations: int = 350,
             timeout_interval_secs: int = 9,
-            ocr_max_pages: int = 120,  # ✅ НОВОЕ
+            ocr_max_pages: int = 120,
+            kbytes_per_page_border: Optional[float] = None,  # ✅ НОВОЕ
             info: Optional[str] = None,
             activate: bool = True
     ) -> Setting:
-        # Сначала проверяем, существует ли уже такая настройка
+        # Проверяем, существует ли уже такая настройка
         existing_setting = self.find_existing_setting(
             nesting_depth_id=nesting_depth_id,
             need_replace=need_replace,
@@ -105,16 +119,16 @@ class DBOperations:
             procession_timeout=procession_timeout,
             timeout_iterations=timeout_iterations,
             timeout_interval_secs=timeout_interval_secs,
-            ocr_max_pages=ocr_max_pages  # ✅
+            ocr_max_pages=ocr_max_pages,
+            kbytes_per_page_border=kbytes_per_page_border  # ✅
         )
 
         if existing_setting:
-            # Если настройка уже существует, просто активируем ее
             if activate:
                 return self.activate_setting(existing_setting.id)
             return existing_setting
 
-        # Если настройки не существует, создаем новую
+        # Создаем новую настройку
         setting = Setting(
             nesting_depth_id=nesting_depth_id,
             need_replace=need_replace,
@@ -124,7 +138,8 @@ class DBOperations:
             procession_timeout=procession_timeout,
             timeout_iterations=timeout_iterations,
             timeout_interval_secs=timeout_interval_secs,
-            ocr_max_pages=ocr_max_pages,  # ✅
+            ocr_max_pages=ocr_max_pages,
+            kbytes_per_page_border=kbytes_per_page_border,  # ✅
             is_active=activate,
             info=info or f"Создано {datetime.datetime.now().strftime('%d.%m.%Y %H:%M')}"
         )
@@ -132,7 +147,6 @@ class DBOperations:
         self.db.add(setting)
         
         if activate:
-            # Деактивируем все текущие настройки ПОСЛЕ добавления новой
             self.db.query(Setting).filter(Setting.id != setting.id).update({Setting.is_active: False})
         
         self.db.commit()
@@ -140,10 +154,7 @@ class DBOperations:
         return setting
 
     def activate_setting(self, setting_id: int) -> Setting:
-        # Деактивируем все настройки
         self.db.query(Setting).update({Setting.is_active: False})
-
-        # Активируем выбранную
         setting = self.db.query(Setting).filter(Setting.id == setting_id).first()
         if setting:
             setting.is_active = True
@@ -187,16 +198,22 @@ class DBOperations:
     def get_compression_method_by_id(self, method_id: int) -> Optional[CompressionMethod]:
         return self.db.query(CompressionMethod).filter(CompressionMethod.id == method_id).first()
 
-    # Инициализация базовых данных
+    # Инициализация базовых данных и миграции
     def initialize_base_data(self):
         self.add_ocr_max_pages_column()
+        self.add_kbytes_per_page_border_column()  # ✅ НОВОЕ
+        self.add_file_pages_and_origin_size_columns()  # ✅ НОВОЕ
+        
         # Создаем причины ошибок
         fail_reasons = [
             {"name": "размер увеличился при сжатии",
              "info": "Файл был пропущен, так как размер после сжатия увеличился"},
             {"name": "превышен таймаут обработки файла",
              "info": "Обработка файла заняла больше времени, чем установленный таймаут"},
-            {"name": "прочая причина", "info": "Другие причины ошибок при обработки файла"}
+            {"name": "прочая причина", 
+             "info": "Другие причины ошибок при обработки файла"},
+            {"name": "превышен лимит размера страницы",  # ✅ НОВОЕ
+             "info": "Файл пропущен, так как размер страницы превышает установленный лимит"}
         ]
 
         for reason_data in fail_reasons:
@@ -211,7 +228,7 @@ class DBOperations:
                 depth = NestingDepth(id=i, name=name)
                 self.db.add(depth)
 
-        # Создаем методы сжатия с OCR-флагами
+        # Создаем методы сжатия
         method_data = [
             {"id": 1, "name": "Ghostscript", "description": "Профессиональное сжатие PDF", "is_ocr_enabled": False},
             {"id": 2, "name": "Стандартное", "description": "Базовое сжатие", "is_ocr_enabled": False},
@@ -231,7 +248,6 @@ class DBOperations:
                 )
                 self.db.add(method)
             else:
-                # Обновляем существующий метод
                 existing_method.description = method_info["description"]
                 existing_method.is_ocr_enabled = method_info["is_ocr_enabled"]
 
@@ -248,7 +264,8 @@ class DBOperations:
                 procession_timeout=35,
                 timeout_iterations=350,
                 timeout_interval_secs=9,
-                ocr_max_pages=120,  # ✅
+                ocr_max_pages=120,
+                kbytes_per_page_border=None,  # ✅ НОВОЕ - по умолчанию отключено
                 info="Настройка по умолчанию",
                 activate=True
             )
@@ -256,21 +273,12 @@ class DBOperations:
     def normalize_path(self, file_path: str) -> str:
         """Нормализует путь для сравнения с учетом особенностей ОС"""
         try:
-            # Приводим к абсолютному пути
             abs_path = os.path.abspath(file_path)
-
-            # Нормализуем разделители
             normalized = abs_path.replace('\\', '/')
-
-            # Для Windows приводим к нижнему регистру
             if os.name == 'nt':
                 normalized = normalized.lower()
-
-            # Убираем конечный слеш если есть
             normalized = normalized.rstrip('/')
-
             return normalized
-
         except Exception as e:
             print(f"Ошибка нормализации пути {file_path}: {e}")
             return file_path
@@ -278,29 +286,24 @@ class DBOperations:
     def normalize_existing_paths(self):
         """Нормализует пути в существующих записях и удаляет дубликаты"""
         try:
-            # Получаем все записи
             all_files = self.db.query(ProcessedFile).all()
             print(f"Всего записей до нормализации: {len(all_files)}")
 
-            # Словарь для отслеживания уникальных путей
             unique_paths = {}
             duplicates_to_remove = []
 
             for pf in all_files:
                 normalized = self.normalize_path(pf.file_full_path)
 
-                # Проверяем, есть ли уже запись с таким нормализованным путем
                 if normalized in unique_paths:
                     print(f"Найден дубликат: {pf.file_full_path} -> {normalized}")
                     duplicates_to_remove.append(pf.id)
                 else:
                     unique_paths[normalized] = pf.id
-                    # Обновляем путь на нормализованный
                     if normalized != pf.file_full_path:
                         pf.file_full_path = normalized
                         print(f"Обновлен путь: {pf.file_full_path} -> {normalized}")
 
-            # Удаляем дубликаты
             if duplicates_to_remove:
                 print(f"Удаляем {len(duplicates_to_remove)} дубликатов")
                 self.db.query(ProcessedFile).filter(
@@ -309,7 +312,6 @@ class DBOperations:
 
             self.db.commit()
             print("Миграция завершена успешно")
-
         except Exception as e:
             print(f"Ошибка миграции: {e}")
             self.db.rollback()
@@ -334,7 +336,6 @@ class DBOperations:
 
         return len(duplicates) == 0
     
-
     def add_ocr_max_pages_column(self):
         """Добавляет поле ocr_max_pages в таблицу setting, если его нет"""
         from sqlalchemy import inspect, text
@@ -345,4 +346,47 @@ class DBOperations:
             self.db.execute(text("ALTER TABLE setting ADD COLUMN ocr_max_pages INTEGER DEFAULT 120 NOT NULL"))
             self.db.commit()
             print("✅ Поле ocr_max_pages добавлено в таблицу setting")
-        
+    
+    # ✅ НОВЫЙ МЕТОД МИГРАЦИИ
+    def add_kbytes_per_page_border_column(self):
+        """Добавляет поле kbytes_per_page_border в таблицу setting, если его нет"""
+        from sqlalchemy import inspect, text
+        try:
+            inspector = inspect(self.db.bind)
+            columns = [col['name'] for col in inspector.get_columns('setting')]
+            
+            if 'kbytes_per_page_border' not in columns:
+                self.db.execute(text(
+                    "ALTER TABLE setting ADD COLUMN kbytes_per_page_border FLOAT DEFAULT NULL"
+                ))
+                self.db.commit()
+                print("✅ Поле kbytes_per_page_border добавлено в таблицу setting")
+        except Exception as e:
+            print(f"⚠️ Ошибка при добавлении kbytes_per_page_border: {e}")
+            self.db.rollback()
+    
+    # ✅ НОВЫЙ МЕТОД МИГРАЦИИ
+    def add_file_pages_and_origin_size_columns(self):
+        """Добавляет поля file_pages и file_origin_size_kbytes в таблицу processed_files"""
+        from sqlalchemy import inspect, text
+        try:
+            inspector = inspect(self.db.bind)
+            columns = [col['name'] for col in inspector.get_columns('processed_files')]
+            
+            if 'file_pages' not in columns:
+                self.db.execute(text(
+                    "ALTER TABLE processed_files ADD COLUMN file_pages INTEGER DEFAULT NULL"
+                ))
+                print("✅ Поле file_pages добавлено в таблицу processed_files")
+            
+            if 'file_origin_size_kbytes' not in columns:
+                self.db.execute(text(
+                    "ALTER TABLE processed_files ADD COLUMN file_origin_size_kbytes FLOAT DEFAULT NULL"
+                ))
+                print("✅ Поле file_origin_size_kbytes добавлено в таблицу processed_files")
+            
+            self.db.commit()
+        except Exception as e:
+            print(f"⚠️ Ошибка при добавлении полей в processed_files: {e}")
+            self.db.rollback()
+            

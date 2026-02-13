@@ -1,4 +1,5 @@
 # models/models.py
+
 import pytz
 from sqlalchemy import (Column,
                         Integer,
@@ -29,8 +30,8 @@ class CompressionMethod(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), nullable=False)
-    description = Column(Text, nullable=True)  # ДОБАВИТЬ описание метода
-    is_ocr_enabled = Column(Boolean, default=False)  # ДОБАВИТЬ флаг OCR
+    description = Column(Text, nullable=True)
+    is_ocr_enabled = Column(Boolean, default=False)
 
     settings = relationship("Setting", back_populates="compression_method")
 
@@ -63,8 +64,11 @@ class Setting(Base):
     timeout_iterations = Column(Integer, nullable=False, default=350)
     timeout_interval_secs = Column(Integer, nullable=False, default=9)
 
-    # ✅ НОВОЕ ПОЛЕ
+    # ✅ OCR поле
     ocr_max_pages = Column(Integer, nullable=False, default=120)
+
+    # ✅ НОВОЕ ПОЛЕ: максимально допустимый размер страницы, КБайт
+    kbytes_per_page_border = Column(Float, nullable=True, default=None)
 
     info = Column(Text, nullable=True)
 
@@ -79,7 +83,8 @@ class Setting(Base):
             'procession_timeout',
             'timeout_iterations',
             'timeout_interval_secs',
-            'ocr_max_pages',  # ✅ ДОБАВЛЕНО
+            'ocr_max_pages',
+            'kbytes_per_page_border',  # ✅ ДОБАВЛЕНО
             name='uq_setting_combination'
         ),
         CheckConstraint('compression_level >= 1 AND compression_level <= 3', name='chk_compression_level'),
@@ -88,7 +93,9 @@ class Setting(Base):
         CheckConstraint('procession_timeout >= 1 AND procession_timeout <= 3600', name='chk_procession_timeout'),
         CheckConstraint('timeout_iterations >= 1 AND timeout_iterations <= 1000', name='chk_timeout_iterations'),
         CheckConstraint('timeout_interval_secs >= 1 AND timeout_interval_secs <= 60', name='chk_timeout_interval_secs'),
-        CheckConstraint('ocr_max_pages >= 1 AND ocr_max_pages <= 1000', name='chk_ocr_max_pages') 
+        CheckConstraint('ocr_max_pages >= 1 AND ocr_max_pages <= 1000', name='chk_ocr_max_pages'),
+        CheckConstraint('kbytes_per_page_border >= 1 OR kbytes_per_page_border IS NULL', 
+                        name='chk_kbytes_per_page_border')
     )
 
     nesting_depth = relationship("NestingDepth", back_populates="settings")
@@ -109,6 +116,10 @@ class ProcessedFile(Base):
     setting_id = Column(Integer, ForeignKey("setting.id"), nullable=False)
     file_compression_kbites = Column(Float, nullable=False, default=0.0)
     other_fail_reason = Column(Text, nullable=True)
+    
+    # ✅ НОВЫЕ ПОЛЯ
+    file_pages = Column(Integer, nullable=True, default=None)  # количество страниц
+    file_origin_size_kbytes = Column(Float, nullable=True, default=None)  # исходный размер в КБ
 
     setting = relationship("Setting", back_populates="processed_files")
     fail_reason_rel = relationship("FailReason", back_populates="processed_files")

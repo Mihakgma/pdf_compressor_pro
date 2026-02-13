@@ -942,7 +942,8 @@ class PDFCompressor:
     # ✅ НОВЫЙ МЕТОД: проверка размера страницы
     def check_page_size_limit(self, file_path):
         """
-        Проверяет, не превышает ли размер страницы установленный лимит.
+        Проверяет, не МЕНЬШЕ ли размер страницы установленного лимита.
+        Если размер страницы НИЖЕ лимита - файл пропускается (он уже достаточно сжат).
         Возвращает (True, pages, size_kbytes, avg_page_size) если проверка пройдена,
         или (False, pages, size_kbytes, avg_page_size) если файл нужно пропустить.
         """
@@ -981,11 +982,11 @@ class PDFCompressor:
                         "info"
                     )
                     
-                    # Проверяем превышение лимита
-                    if avg_page_size > border:
+                    # ✅ ИСПРАВЛЕНО: Пропускаем, если размер страницы МЕНЬШЕ лимита
+                    if avg_page_size < border:
                         self.add_to_log(
-                            f"⛔ Превышен лимит размера страницы: {avg_page_size:.1f} > {border} КБ/стр. "
-                            f"Файл будет пропущен.",
+                            f"⏭️ Файл уже хорошо сжат: {avg_page_size:.1f} < {border} КБ/стр. "
+                            f"Пропускаем (нецелесообразно сжимать).",
                             "warning"
                         )
                         return False, num_pages, file_size_kbytes, avg_page_size
@@ -1043,7 +1044,7 @@ class PDFCompressor:
                 
                 # ✅ Формируем детальное описание причины
                 border = self.kbytes_per_page_border.get()
-                other_reason = f"fact kbytes_per_page = {avg_page_size:.2f}, border = {border:.2f}"
+                other_reason = f"Файл пропущен: размер страницы {avg_page_size:.2f} КБ/стр < лимита {border:.2f} КБ/стр (уже хорошо сжат)"
                 
                 self.db_ops.create_processed_file(
                     file_full_path=file_path,

@@ -54,6 +54,7 @@ class PDFCompressor:
         self.file_timeout = tk.IntVar(value=self.active_setting.procession_timeout if self.active_setting else 35)
         self.timeout_iterations = tk.IntVar(value=self.active_setting.timeout_iterations if self.active_setting else 350)
         self.timeout_interval_secs = tk.IntVar(value=self.active_setting.timeout_interval_secs if self.active_setting else 9)
+        self.ocr_max_pages = tk.IntVar(value=self.active_setting.ocr_max_pages if self.active_setting else 120)
 
         # Инициализация OCR процессора - ОТЛОЖЕННАЯ
         self.ocr_processor = None
@@ -266,6 +267,7 @@ class PDFCompressor:
                     procession_timeout=self.file_timeout.get(),
                     timeout_iterations=self.timeout_iterations.get(),
                     timeout_interval_secs=self.timeout_interval_secs.get(),
+                    ocr_max_pages=self.ocr_max_pages.get(),  # ✅
                     info=f"Создано {datetime.now().strftime('%d.%m.%Y %H:%M')}",
                     activate=True
                 )
@@ -323,6 +325,7 @@ class PDFCompressor:
             self.file_timeout.set(self.active_setting.procession_timeout)
             self.timeout_iterations.set(self.active_setting.timeout_iterations)
             self.timeout_interval_secs.set(self.active_setting.timeout_interval_secs)
+            self.ocr_max_pages.set(self.active_setting.ocr_max_pages)  # ✅
             
             # Обновляем комбобокс метода сжатия
             if self.method_combo:
@@ -605,34 +608,49 @@ class PDFCompressor:
         ).pack(side=tk.LEFT)
         ttk.Label(interval_frame, text="сек (1-60)").pack(side=tk.LEFT, padx=5)
 
+        # Максимальное количество страниц для OCR
+        ttk.Label(main_frame, text="Макс. страниц для OCR:").grid(row=9, column=0, sticky=tk.W, pady=5)
+        ocr_pages_frame = ttk.Frame(main_frame)
+        ocr_pages_frame.grid(row=9, column=1, sticky=(tk.W, tk.E), pady=5)
+
+        ttk.Spinbox(
+            ocr_pages_frame,
+            from_=1,
+            to=1000,
+            increment=10,
+            textvariable=self.ocr_max_pages,
+            width=10
+        ).pack(side=tk.LEFT)
+        ttk.Label(ocr_pages_frame, text="стр. (1-1000)").pack(side=tk.LEFT, padx=5)
+
         # Кнопка запуска
-        ttk.Button(main_frame, text="Начать сжатие", command=self.start_compression).grid(row=9, column=0, columnspan=3,
+        ttk.Button(main_frame, text="Начать сжатие", command=self.start_compression).grid(row=10, column=0, columnspan=3,
                                                                                           pady=10)
 
         # Кнопка открытия папки с логами
-        ttk.Button(main_frame, text="Открыть папку с журналами", command=self.open_logs_folder).grid(row=9, column=2,
+        ttk.Button(main_frame, text="Открыть папку с журналами", command=self.open_logs_folder).grid(row=10, column=2,
                                                                                                      pady=10,
                                                                                                      sticky=tk.E)
         # Кнопка инструкции
         ttk.Button(main_frame, text="📖 ИНСТРУКЦИЯ",
-                   command=self.show_instructions).grid(row=10, column=0, pady=10, sticky=tk.W)
+                   command=self.show_instructions).grid(row=11, column=0, pady=10, sticky=tk.W)
         ttk.Button(main_frame, text="Статистика сжатия",
-                   command=self.show_stats).grid(row=10, column=1, pady=10)
+                   command=self.show_stats).grid(row=11, column=1, pady=10)
 
         # Кнопка управления настройками
-        self.settings_button.grid(row=10, column=2, pady=10, sticky=tk.E)
+        self.settings_button.grid(row=11, column=2, pady=10, sticky=tk.E)
 
         # Кнопка пропуска файла
-        self.skip_button.grid(row=11, column=0, columnspan=2, pady=5)
+        self.skip_button.grid(row=12, column=0, columnspan=2, pady=5)
 
         # Журнал операций
-        ttk.Label(main_frame, text="Журнал операций:").grid(row=12, column=0, sticky=tk.W, pady=5)
-        self.log_text.grid(row=13, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
-        self.log_scrollbar.grid(row=13, column=3, sticky=(tk.N, tk.S), pady=5)
+        ttk.Label(main_frame, text="Журнал операций:").grid(row=13, column=0, sticky=tk.W, pady=5)
+        self.log_text.grid(row=14, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+        self.log_scrollbar.grid(row=14, column=3, sticky=(tk.N, tk.S), pady=5)
 
         # Статистика
         stats_frame = ttk.Frame(main_frame)
-        stats_frame.grid(row=14, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        stats_frame.grid(row=15, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
 
         # Правильное создание меток статистики
         ttk.Label(stats_frame, text="Обработано:").grid(row=0, column=0, padx=5)
@@ -654,7 +672,7 @@ class PDFCompressor:
         info_label = ttk.Label(main_frame, 
                               text="Для работы программы требуется установленный Ghostscript. Для OCR методов также нужен Tesseract.",
                               foreground="blue")
-        info_label.grid(row=15, column=0, columnspan=3, pady=5)
+        info_label.grid(row=16, column=0, columnspan=3, pady=5)
 
         # Настройка весов для растягивания
         main_frame.rowconfigure(13, weight=1)
@@ -897,6 +915,7 @@ class PDFCompressor:
             self.add_to_log(f"Ошибка сжатия PDF: {e}", "error")
             return False, 0
 
+
     def process_single_file(self, file_path):
         """Обрабатывает один файл"""
         self.current_file_path = file_path
@@ -913,7 +932,6 @@ class PDFCompressor:
                 self.update_stats()
                 return
             
-            # === ДОБАВЬТЕ ЭТУ ПРОВЕРКУ ЗДЕСЬ ===
             # Проверяем размер файла (минимум 1 МБ = 1024 * 1024 байт)
             file_size_bytes = os.path.getsize(file_path)
             min_size_bytes = 1024 * 1024  # 1 МБ
@@ -928,7 +946,55 @@ class PDFCompressor:
                 )
                 self.update_stats()
                 return
-            # === КОНЕЦ ДОБАВЛЕННОГО КОДА ===
+
+            # ===== ПРОВЕРКА ДЛЯ OCR-МЕТОДОВ (МАКС. КОЛИЧЕСТВО СТРАНИЦ) =====
+            selected_method = self.method_combo.get()
+            method_id = int(selected_method.split(':')[0]) if selected_method else 0
+            
+            method = self.db_ops.get_compression_method_by_id(method_id)
+            if method and method.is_ocr_enabled:
+                try:
+                    # Импортируем PyPDF2 для чтения количества страниц
+                    try:
+                        from PyPDF2 import PdfReader
+                        PYPDF2_AVAILABLE = True
+                    except ImportError:
+                        PYPDF2_AVAILABLE = False
+                        self.add_to_log("PyPDF2 не установлен. Проверка количества страниц для OCR отключена.", "warning")
+                    
+                    if PYPDF2_AVAILABLE:
+                        with open(file_path, 'rb') as f:
+                            reader = PdfReader(f)
+                            num_pages = len(reader.pages)
+                        
+                        max_pages = self.ocr_max_pages.get()
+                        
+                        if num_pages > max_pages:
+                            self.skipped_files += 1
+                            self.add_to_log(
+                                f"Пропуск OCR-файла (страниц: {num_pages} > {max_pages}): {os.path.basename(file_path)}",
+                                "warning"
+                            )
+                            
+                            # Сохраняем в БД как "прочая причина" с уточнением
+                            fail_reason = self.db_ops.get_fail_reason_by_name("прочая причина")
+                            active_setting = self.db_ops.get_active_setting()
+                            setting_id = active_setting.id if active_setting else 1
+                            
+                            self.db_ops.create_processed_file(
+                                file_full_path=file_path,
+                                is_successful=False,
+                                setting_id=setting_id,
+                                file_compression_kbites=0.0,
+                                fail_reason_id=fail_reason.id if fail_reason else None,
+                                other_fail_reason=f"{num_pages} fact pages in file"
+                            )
+                            
+                            self.update_stats()
+                            return
+                except Exception as e:
+                    self.add_to_log(f"Не удалось определить количество страниц в {os.path.basename(file_path)}: {e}", "warning")
+            # ===== КОНЕЦ ПРОВЕРКИ ДЛЯ OCR =====
 
             # Создаем временный файл для результата
             temp_dir = tempfile.gettempdir()
@@ -1020,6 +1086,7 @@ class PDFCompressor:
         except Exception as e:
             self.failed_files += 1
             self.add_to_log(f"Критическая ошибка обработки {file_path}: {e}", "error")
+            self.add_to_log(traceback.format_exc(), "error")
 
             # Сохраняем в БД с прочей причиной
             fail_reason = self.db_ops.get_fail_reason_by_name("прочая причина")
@@ -1039,6 +1106,7 @@ class PDFCompressor:
             self.currently_processing = False
             self.current_file_path = None
             self.update_stats()
+
 
     def find_pdf_files(self, directory, depth):
         """Находит PDF файлы в директории с учетом глубины вложенности"""
@@ -1253,6 +1321,12 @@ class PDFCompressor:
         • Для больших файлов увеличьте таймаут обработки
         • Убедитесь, что Tesseract установлен для использования OCR-методов
         • Проверьте доступность языковых пакетов (rus, eng)
+
+        ⚠️ МАКСИМАЛЬНОЕ КОЛИЧЕСТВО СТРАНИЦ ДЛЯ OCR:
+        • Защита от зависания при обработке огромных сканов
+        • Файлы с бóльшим числом страниц будут пропущены
+        • Рекомендуется: 120 страниц (по умолчанию)
+        • Диапазон: 1–1000 страниц
     
         ⚙️ ДОПОЛНИТЕЛЬНЫЕ ФУНКЦИИ:
     

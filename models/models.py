@@ -63,6 +63,9 @@ class Setting(Base):
     timeout_iterations = Column(Integer, nullable=False, default=350)
     timeout_interval_secs = Column(Integer, nullable=False, default=9)
 
+    # ✅ НОВОЕ ПОЛЕ
+    ocr_max_pages = Column(Integer, nullable=False, default=120)
+
     info = Column(Text, nullable=True)
 
     # Constraint для уникальности комбинации полей
@@ -76,6 +79,7 @@ class Setting(Base):
             'procession_timeout',
             'timeout_iterations',
             'timeout_interval_secs',
+            'ocr_max_pages',  # ✅ ДОБАВЛЕНО
             name='uq_setting_combination'
         ),
         CheckConstraint('compression_level >= 1 AND compression_level <= 3', name='chk_compression_level'),
@@ -83,7 +87,8 @@ class Setting(Base):
                         name='chk_compression_min_boundary'),
         CheckConstraint('procession_timeout >= 1 AND procession_timeout <= 3600', name='chk_procession_timeout'),
         CheckConstraint('timeout_iterations >= 1 AND timeout_iterations <= 1000', name='chk_timeout_iterations'),
-        CheckConstraint('timeout_interval_secs >= 1 AND timeout_interval_secs <= 60', name='chk_timeout_interval_secs')
+        CheckConstraint('timeout_interval_secs >= 1 AND timeout_interval_secs <= 60', name='chk_timeout_interval_secs'),
+        CheckConstraint('ocr_max_pages >= 1 AND ocr_max_pages <= 1000', name='chk_ocr_max_pages') 
     )
 
     nesting_depth = relationship("NestingDepth", back_populates="settings")

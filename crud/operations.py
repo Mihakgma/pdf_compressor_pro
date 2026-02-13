@@ -64,7 +64,8 @@ class DBOperations:
             compression_min_boundary: int,
             procession_timeout: int,
             timeout_iterations: int,
-            timeout_interval_secs: int
+            timeout_interval_secs: int,
+            ocr_max_pages: int  # ✅ ДОБАВЛЕНО
     ) -> Optional[Setting]:
         return self.db.query(Setting).filter(
             and_(
@@ -75,7 +76,8 @@ class DBOperations:
                 Setting.compression_min_boundary == compression_min_boundary,
                 Setting.procession_timeout == procession_timeout,
                 Setting.timeout_iterations == timeout_iterations,
-                Setting.timeout_interval_secs == timeout_interval_secs
+                Setting.timeout_interval_secs == timeout_interval_secs,
+                Setting.ocr_max_pages == ocr_max_pages  # ✅ ДОБАВЛЕНО
             )
         ).first()
 
@@ -89,6 +91,7 @@ class DBOperations:
             procession_timeout: int = 35,
             timeout_iterations: int = 350,
             timeout_interval_secs: int = 9,
+            ocr_max_pages: int = 120,  # ✅ НОВОЕ
             info: Optional[str] = None,
             activate: bool = True
     ) -> Setting:
@@ -101,7 +104,8 @@ class DBOperations:
             compression_min_boundary=compression_min_boundary,
             procession_timeout=procession_timeout,
             timeout_iterations=timeout_iterations,
-            timeout_interval_secs=timeout_interval_secs
+            timeout_interval_secs=timeout_interval_secs,
+            ocr_max_pages=ocr_max_pages  # ✅
         )
 
         if existing_setting:
@@ -120,6 +124,7 @@ class DBOperations:
             procession_timeout=procession_timeout,
             timeout_iterations=timeout_iterations,
             timeout_interval_secs=timeout_interval_secs,
+            ocr_max_pages=ocr_max_pages,  # ✅
             is_active=activate,
             info=info or f"Создано {datetime.datetime.now().strftime('%d.%m.%Y %H:%M')}"
         )
@@ -184,6 +189,7 @@ class DBOperations:
 
     # Инициализация базовых данных
     def initialize_base_data(self):
+        self.add_ocr_max_pages_column()
         # Создаем причины ошибок
         fail_reasons = [
             {"name": "размер увеличился при сжатии",
@@ -242,6 +248,7 @@ class DBOperations:
                 procession_timeout=35,
                 timeout_iterations=350,
                 timeout_interval_secs=9,
+                ocr_max_pages=120,  # ✅
                 info="Настройка по умолчанию",
                 activate=True
             )
@@ -327,3 +334,15 @@ class DBOperations:
 
         return len(duplicates) == 0
     
+
+    def add_ocr_max_pages_column(self):
+        """Добавляет поле ocr_max_pages в таблицу setting, если его нет"""
+        from sqlalchemy import inspect, text
+        inspector = inspect(self.db.bind)
+        columns = [col['name'] for col in inspector.get_columns('setting')]
+        
+        if 'ocr_max_pages' not in columns:
+            self.db.execute(text("ALTER TABLE setting ADD COLUMN ocr_max_pages INTEGER DEFAULT 120 NOT NULL"))
+            self.db.commit()
+            print("✅ Поле ocr_max_pages добавлено в таблицу setting")
+        

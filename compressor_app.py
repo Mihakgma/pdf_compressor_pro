@@ -1005,19 +1005,76 @@ class PDFCompressor:
         self.stop_current_file = False
         self.processing_start_time = time.time()
         
-        # Получаем базовую информацию о файле
-        file_size_bytes = os.path.getsize(file_path)
-        file_size_kbytes = file_size_bytes / 1024.0
+        # Инициализируем переменные
+        file_size_bytes = 0
+        file_size_kbytes = 0
         num_pages = None
+        avg_page_size = None
 
         try:
-            # Проверяем, не обрабатывался ли файл ранее
-            processed_file = self.db_ops.get_processed_file_by_path(file_path)
-            if processed_file:
-                self.skipped_files += 1
-                self.add_to_log(f"Файл уже обрабатывался ранее: {os.path.basename(file_path)}", "warning")
+            # ===== ЗАЩИТА: проверяем доступность файла =====
+            if not os.path.exists(file_path):
+                self.failed_files += 1
+                error_msg = f"Файл не найден или недоступен: {file_path}"
+                self.add_to_log(f"❌ {error_msg}", "error")
+                
+                # Сохраняем в БД
+                fail_reason = self.db_ops.get_fail_reason_by_name("прочая причина")
+                active_setting = self.db_ops.get_active_setting()
+                setting_id = active_setting.id if active_setting else 1
+                
+                self.db_ops.create_processed_file(
+                    file_full_path=file_path,
+                    is_successful=False,
+                    setting_id=setting_id,
+                    file_compression_kbites=0.0,
+                    fail_reason_id=fail_reason.id if fail_reason else None,
+                    other_fail_reason=f"Файл недоступен: {error_msg}",
+                    file_pages=None,
+                    file_origin_size_kbytes=None
+                )
+                
                 self.update_stats()
                 return
+
+            # Получаем базовую информацию о файле с защитой от ошибок
+            try:
+                file_size_bytes = os.path.getsize(file_path)
+                file_size_kbytes = file_size_bytes / 1024.0
+            except Exception as e:
+                self.failed_files += 1
+                self.add_to_log(f"❌ Не удалось получить размер файла {os.path.basename(file_path)}: {e}", "error")
+                
+                # Сохраняем в БД
+                fail_reason = self.db_ops.get_fail_reason_by_name("прочая причина")
+                active_setting = self.db_ops.get_active_setting()
+                setting_id = active_setting.id if active_setting else 1
+                
+                self.db_ops.create_processed_file(
+                    file_full_path=file_path,
+                    is_successful=False,
+                    setting_id=setting_id,
+                    file_compression_kbites=0.0,
+                    fail_reason_id=fail_reason.id if fail_reason else None,
+                    other_fail_reason=f"Ошибка получения размера файла: {str(e)}",
+                    file_pages=None,
+                    file_origin_size_kbytes=None
+                )
+                
+                self.update_stats()
+                return
+
+            # Проверяем, не обрабатывался ли файл ранее
+            try:
+                processed_file = self.db_ops.get_processed_file_by_path(file_path)
+                if processed_file:
+                    self.skipped_files += 1
+                    self.add_to_log(f"Файл уже обрабатывался ранее: {os.path.basename(file_path)}", "warning")
+                    self.update_stats()
+                    return
+            except Exception as e:
+                self.add_to_log(f"⚠️ Ошибка проверки дубликата для {os.path.basename(file_path)}: {e}", "warning")
+                # Продолжаем обработку, если не можем проверить дубликат
             
             # Проверяем минимальный размер файла (1 МБ)
             min_size_bytes = 1024 * 1024
@@ -1029,44 +1086,70 @@ class PDFCompressor:
                     f"(размер: {file_size_mb:.2f} МБ)", 
                     "warning"
                 )
+                
+                # Сохраняем в БД информацию о пропуске
+                try:
+                    active_setting = self.db_ops.get_active_setting()
+                    setting_id = active_setting.id if active_setting else 1
+                    
+                    self.db_ops.create_processed_file(
+                        file_full_path=file_path,
+                        is_successful=False,
+                        setting_id=setting_id,
+                        file_compression_kbites=0.0,
+                        fail_reason_id=None,
+                        other_fail_reason=f"Файл меньше 1 МБ ({file_size_mb:.2f} МБ)",
+                        file_pages=None,
+                        file_origin_size_kbytes=file_size_kbytes
+                    )
+                except Exception as e:
+                    self.add_to_log(f"⚠️ Ошибка сохранения в БД: {e}", "warning")
+                
                 self.update_stats()
                 return
 
             # ===== ПРОВЕРКА 1: ЛИМИТ РАЗМЕРА СТРАНИЦЫ =====
-            page_check_ok, num_pages, file_size_kbytes, avg_page_size = self.check_page_size_limit(file_path)
-            if not page_check_ok:
-                self.skipped_files += 1
-                
-                # Сохраняем в БД с указанием причины
-                fail_reason = self.db_ops.get_fail_reason_by_name("превышен лимит размера страницы")
-                active_setting = self.db_ops.get_active_setting()
-                setting_id = active_setting.id if active_setting else 1
-                
-                # ✅ Формируем детальное описание причины
-                border = self.kbytes_per_page_border.get()
-                other_reason = f"Файл пропущен: размер страницы {avg_page_size:.2f} КБ/стр < лимита {border:.2f} КБ/стр (уже хорошо сжат)"
-                
-                self.db_ops.create_processed_file(
-                    file_full_path=file_path,
-                    is_successful=False,
-                    setting_id=setting_id,
-                    file_compression_kbites=0.0,
-                    fail_reason_id=fail_reason.id if fail_reason else None,
-                    other_fail_reason=other_reason,
-                    file_pages=num_pages,
-                    file_origin_size_kbytes=file_size_kbytes
-                )
-                
-                self.update_stats()
-                return
+            try:
+                page_check_ok, num_pages, file_size_kbytes, avg_page_size = self.check_page_size_limit(file_path)
+                if not page_check_ok:
+                    self.skipped_files += 1
+                    
+                    # Сохраняем в БД с указанием причины
+                    try:
+                        fail_reason = self.db_ops.get_fail_reason_by_name("превышен лимит размера страницы")
+                        active_setting = self.db_ops.get_active_setting()
+                        setting_id = active_setting.id if active_setting else 1
+                        
+                        border = self.kbytes_per_page_border.get()
+                        other_reason = f"Файл пропущен: размер страницы {avg_page_size:.2f} КБ/стр < лимита {border:.2f} КБ/стр (уже хорошо сжат)"
+                        
+                        self.db_ops.create_processed_file(
+                            file_full_path=file_path,
+                            is_successful=False,
+                            setting_id=setting_id,
+                            file_compression_kbites=0.0,
+                            fail_reason_id=fail_reason.id if fail_reason else None,
+                            other_fail_reason=other_reason,
+                            file_pages=num_pages,
+                            file_origin_size_kbytes=file_size_kbytes
+                        )
+                    except Exception as e:
+                        self.add_to_log(f"⚠️ Ошибка сохранения в БД: {e}", "warning")
+                    
+                    self.update_stats()
+                    return
+            except Exception as e:
+                self.add_to_log(f"⚠️ Ошибка проверки лимита страницы для {os.path.basename(file_path)}: {e}", "warning")
+                # Продолжаем обработку, если не можем проверить лимит
+                page_check_ok = True
 
             # ===== ПРОВЕРКА 2: OCR МЕТОДЫ И МАКС. СТРАНИЦ =====
-            selected_method = self.method_combo.get()
-            method_id = int(selected_method.split(':')[0]) if selected_method else 0
-            
-            method = self.db_ops.get_compression_method_by_id(method_id)
-            if method and method.is_ocr_enabled:
-                try:
+            try:
+                selected_method = self.method_combo.get()
+                method_id = int(selected_method.split(':')[0]) if selected_method else 0
+                
+                method = self.db_ops.get_compression_method_by_id(method_id)
+                if method and method.is_ocr_enabled:
                     # Если еще не получили количество страниц
                     if num_pages is None:
                         try:
@@ -1075,7 +1158,7 @@ class PDFCompressor:
                                 reader = PdfReader(f)
                                 num_pages = len(reader.pages)
                         except Exception as e:
-                            self.add_to_log(f"Не удалось определить количество страниц: {e}", "warning")
+                            self.add_to_log(f"⚠️ Не удалось определить количество страниц для OCR: {e}", "warning")
                             num_pages = 0
                     
                     max_pages = self.ocr_max_pages.get()
@@ -1087,7 +1170,141 @@ class PDFCompressor:
                             "warning"
                         )
                         
-                        fail_reason = self.db_ops.get_fail_reason_by_name("прочая причина")
+                        try:
+                            fail_reason = self.db_ops.get_fail_reason_by_name("прочая причина")
+                            active_setting = self.db_ops.get_active_setting()
+                            setting_id = active_setting.id if active_setting else 1
+                            
+                            self.db_ops.create_processed_file(
+                                file_full_path=file_path,
+                                is_successful=False,
+                                setting_id=setting_id,
+                                file_compression_kbites=0.0,
+                                fail_reason_id=fail_reason.id if fail_reason else None,
+                                other_fail_reason=f"{num_pages} fact pages in file > {max_pages}",
+                                file_pages=num_pages,
+                                file_origin_size_kbytes=file_size_kbytes
+                            )
+                        except Exception as e:
+                            self.add_to_log(f"⚠️ Ошибка сохранения в БД: {e}", "warning")
+                        
+                        self.update_stats()
+                        return
+            except Exception as e:
+                self.add_to_log(f"⚠️ Ошибка проверки OCR для {os.path.basename(file_path)}: {e}", "warning")
+
+            # Создаем временный файл для результата с защитой от ошибок
+            temp_output = None
+            try:
+                temp_dir = tempfile.gettempdir()
+                temp_output = os.path.join(temp_dir, f"temp_compress_{uuid.uuid4().hex}.pdf")
+            except Exception as e:
+                self.failed_files += 1
+                self.add_to_log(f"❌ Не удалось создать временный файл: {e}", "error")
+                
+                # Сохраняем в БД
+                try:
+                    fail_reason = self.db_ops.get_fail_reason_by_name("прочая причина")
+                    active_setting = self.db_ops.get_active_setting()
+                    setting_id = active_setting.id if active_setting else 1
+                    
+                    self.db_ops.create_processed_file(
+                        file_full_path=file_path,
+                        is_successful=False,
+                        setting_id=setting_id,
+                        file_compression_kbites=0.0,
+                        fail_reason_id=fail_reason.id if fail_reason else None,
+                        other_fail_reason=f"Ошибка создания временного файла: {str(e)}",
+                        file_pages=num_pages,
+                        file_origin_size_kbytes=file_size_kbytes
+                    )
+                except Exception as db_e:
+                    self.add_to_log(f"⚠️ Ошибка сохранения в БД: {db_e}", "warning")
+                
+                self.update_stats()
+                return
+
+            # Сжимаем файл с защитой от ошибок
+            try:
+                self.add_to_log(f"Обработка: {os.path.basename(file_path)}")
+                success, saving = self.compress_pdf(file_path, temp_output)
+            except Exception as e:
+                self.failed_files += 1
+                self.add_to_log(f"❌ Критическая ошибка при сжатии {os.path.basename(file_path)}: {e}", "error")
+                self.add_to_log(traceback.format_exc(), "error")
+                success = False
+                saving = 0
+
+            if self.stop_current_file:
+                self.add_to_log(f"Обработка прервана пользователем: {os.path.basename(file_path)}", "warning")
+                # Удаляем временный файл
+                try:
+                    if temp_output and os.path.exists(temp_output):
+                        os.remove(temp_output)
+                except:
+                    pass
+                return
+
+            if success:
+                # Заменяем исходный файл, если выбрана опция
+                if self.replace_original.get():
+                    backup_path = None
+                    try:
+                        # Создаем бэкап
+                        backup_path = file_path + '.backup'
+                        shutil.copy2(file_path, backup_path)
+                        # Заменяем исходный файл
+                        shutil.move(temp_output, file_path)
+                        # Удаляем бэкап после успешной замены
+                        if os.path.exists(backup_path):
+                            os.remove(backup_path)
+                    except Exception as e:
+                        self.add_to_log(f"⚠️ Ошибка замены файла: {e}", "error")
+                        # Восстанавливаем из бэкапа при ошибке
+                        if backup_path and os.path.exists(backup_path):
+                            try:
+                                shutil.move(backup_path, file_path)
+                            except:
+                                pass
+                        success = False
+
+                if success:
+                    # Обновляем статистику
+                    self.processed_files += 1
+                    try:
+                        self.total_original_size += os.path.getsize(file_path) + saving
+                        self.total_compressed_size += os.path.getsize(file_path)
+                    except:
+                        pass
+
+                    # Сохраняем в БД
+                    try:
+                        selected_method = self.method_combo.get()
+                        method_id = int(selected_method.split(':')[0]) if selected_method else 1
+                        
+                        active_setting = self.db_ops.get_active_setting()
+                        setting_id = active_setting.id if active_setting else 1
+
+                        self.db_ops.create_processed_file(
+                            file_full_path=file_path,
+                            is_successful=True,
+                            setting_id=setting_id,
+                            file_compression_kbites=saving / 1024,
+                            file_pages=num_pages,
+                            file_origin_size_kbytes=file_size_kbytes
+                        )
+                    except Exception as e:
+                        self.add_to_log(f"⚠️ Ошибка сохранения в БД: {e}", "warning")
+
+                    self.add_to_log(f"✅ Успешно сжат: {os.path.basename(file_path)} (экономия: {saving / 1024:.2f} KB)",
+                                    "success")
+                else:
+                    # Если не успешно, обрабатываем как ошибку
+                    self.failed_files += 1
+                    self.add_to_log(f"❌ Не удалось сжать: {os.path.basename(file_path)}", "error")
+                    
+                    # Сохраняем в БД
+                    try:
                         active_setting = self.db_ops.get_active_setting()
                         setting_id = active_setting.id if active_setting else 1
                         
@@ -1096,71 +1313,13 @@ class PDFCompressor:
                             is_successful=False,
                             setting_id=setting_id,
                             file_compression_kbites=0.0,
-                            fail_reason_id=fail_reason.id if fail_reason else None,
-                            other_fail_reason=f"{num_pages} fact pages in file",
+                            fail_reason_id=None,
+                            other_fail_reason="Ошибка сжатия",
                             file_pages=num_pages,
                             file_origin_size_kbytes=file_size_kbytes
                         )
-                        
-                        self.update_stats()
-                        return
-                except Exception as e:
-                    self.add_to_log(f"Ошибка проверки страниц для OCR: {e}", "warning")
-
-            # Создаем временный файл для результата
-            temp_dir = tempfile.gettempdir()
-            temp_output = os.path.join(temp_dir, f"temp_compress_{uuid.uuid4().hex}.pdf")
-
-            # Сжимаем файл
-            self.add_to_log(f"Обработка: {os.path.basename(file_path)}")
-            success, saving = self.compress_pdf(file_path, temp_output)
-
-            if self.stop_current_file:
-                self.add_to_log(f"Обработка прервана пользователем: {os.path.basename(file_path)}", "warning")
-                return
-
-            if success:
-                # Заменяем исходный файл, если выбрана опция
-                if self.replace_original.get():
-                    backup_path = file_path + '.backup'
-                    try:
-                        # Создаем бэкап
-                        shutil.copy2(file_path, backup_path)
-                        # Заменяем исходный файл
-                        shutil.move(temp_output, file_path)
-                        # Удаляем бэкап после успешной замены
-                        os.remove(backup_path)
                     except Exception as e:
-                        self.add_to_log(f"Ошибка замены файла: {e}", "error")
-                        # Восстанавливаем из бэкапа при ошибке
-                        if os.path.exists(backup_path):
-                            shutil.move(backup_path, file_path)
-                        success = False
-
-                # Обновляем статистику
-                self.processed_files += 1
-                self.total_original_size += os.path.getsize(file_path) + saving
-                self.total_compressed_size += os.path.getsize(file_path)
-
-                # Сохраняем в БД
-                selected_method = self.method_combo.get()
-                method_id = int(selected_method.split(':')[0]) if selected_method else 1
-                
-                # Получаем активные настройки
-                active_setting = self.db_ops.get_active_setting()
-                setting_id = active_setting.id if active_setting else 1
-
-                self.db_ops.create_processed_file(
-                    file_full_path=file_path,
-                    is_successful=True,
-                    setting_id=setting_id,
-                    file_compression_kbites=saving / 1024,
-                    file_pages=num_pages,
-                    file_origin_size_kbytes=file_size_kbytes
-                )
-
-                self.add_to_log(f"Успешно сжат: {os.path.basename(file_path)} (экономия: {saving / 1024:.2f} KB)",
-                                "success")
+                        self.add_to_log(f"⚠️ Ошибка сохранения в БД: {e}", "warning")
 
             else:
                 self.failed_files += 1
@@ -1169,15 +1328,54 @@ class PDFCompressor:
                 fail_reason = None
                 other_fail_reason = None
 
-                if saving > 0 and saving < self.min_saving_threshold.get():
-                    fail_reason = self.db_ops.get_fail_reason_by_name("размер увеличился при сжатии")
-                elif time.time() - self.processing_start_time > self.file_timeout.get():
-                    fail_reason = self.db_ops.get_fail_reason_by_name("превышен таймаут обработки файла")
-                else:
-                    fail_reason = self.db_ops.get_fail_reason_by_name("прочая причина")
+                try:
+                    if saving > 0 and saving < self.min_saving_threshold.get():
+                        fail_reason = self.db_ops.get_fail_reason_by_name("размер увеличился при сжатии")
+                    elif time.time() - self.processing_start_time > self.file_timeout.get():
+                        fail_reason = self.db_ops.get_fail_reason_by_name("превышен таймаут обработки файла")
+                    else:
+                        fail_reason = self.db_ops.get_fail_reason_by_name("прочая причина")
+                        other_fail_reason = traceback.format_exc()
+                except:
                     other_fail_reason = traceback.format_exc()
 
                 # Сохраняем в БД
+                try:
+                    active_setting = self.db_ops.get_active_setting()
+                    setting_id = active_setting.id if active_setting else 1
+
+                    self.db_ops.create_processed_file(
+                        file_full_path=file_path,
+                        is_successful=False,
+                        setting_id=setting_id,
+                        file_compression_kbites=0.0,
+                        fail_reason_id=fail_reason.id if fail_reason else None,
+                        other_fail_reason=other_fail_reason,
+                        file_pages=num_pages,
+                        file_origin_size_kbytes=file_size_kbytes
+                    )
+                except Exception as e:
+                    self.add_to_log(f"⚠️ Ошибка сохранения в БД: {e}", "warning")
+
+                self.add_to_log(f"❌ Не удалось сжать: {os.path.basename(file_path)}", "error")
+
+            # Удаляем временный файл
+            try:
+                if temp_output and os.path.exists(temp_output):
+                    os.remove(temp_output)
+            except Exception as e:
+                self.add_to_log(f"⚠️ Ошибка удаления временного файла: {e}", "warning")
+
+        except Exception as e:
+            # Глобальная обработка ошибок - программа НЕ падает
+            self.failed_files += 1
+            error_msg = f"Критическая ошибка обработки {os.path.basename(file_path)}: {str(e)}"
+            self.add_to_log(f"❌ {error_msg}", "error")
+            self.add_to_log(traceback.format_exc(), "error")
+
+            # Сохраняем в БД с прочей причиной
+            try:
+                fail_reason = self.db_ops.get_fail_reason_by_name("прочая причина")
                 active_setting = self.db_ops.get_active_setting()
                 setting_id = active_setting.id if active_setting else 1
 
@@ -1187,37 +1385,13 @@ class PDFCompressor:
                     setting_id=setting_id,
                     file_compression_kbites=0.0,
                     fail_reason_id=fail_reason.id if fail_reason else None,
-                    other_fail_reason=other_fail_reason,
+                    other_fail_reason=f"Критическая ошибка: {str(e)[:200]}",
                     file_pages=num_pages,
-                    file_origin_size_kbytes=file_size_kbytes
+                    file_origin_size_kbytes=file_size_kbytes if file_size_kbytes > 0 else None
                 )
-
-                self.add_to_log(f"Не удалось сжать: {os.path.basename(file_path)}", "error")
-
-            # Удаляем временный файл, если он остался
-            if os.path.exists(temp_output):
-                os.remove(temp_output)
-
-        except Exception as e:
-            self.failed_files += 1
-            self.add_to_log(f"Критическая ошибка обработки {file_path}: {e}", "error")
-            self.add_to_log(traceback.format_exc(), "error")
-
-            # Сохраняем в БД с прочей причиной
-            fail_reason = self.db_ops.get_fail_reason_by_name("прочая причина")
-            active_setting = self.db_ops.get_active_setting()
-            setting_id = active_setting.id if active_setting else 1
-
-            self.db_ops.create_processed_file(
-                file_full_path=file_path,
-                is_successful=False,
-                setting_id=setting_id,
-                file_compression_kbites=0.0,
-                fail_reason_id=fail_reason.id if fail_reason else None,
-                other_fail_reason=traceback.format_exc(),
-                file_pages=num_pages,
-                file_origin_size_kbytes=file_size_kbytes
-            )
+            except:
+                pass  # Если даже БД упала - просто логируем в консоль
+                print(f"CRITICAL ERROR: {error_msg}")
 
         finally:
             self.currently_processing = False

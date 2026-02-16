@@ -1,6 +1,8 @@
 # crud/operations.py
 
+
 import os
+import re
 
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
@@ -34,11 +36,17 @@ class DBOperations:
             file_compression_kbites: float = 0.0,
             fail_reason_id: Optional[int] = None,
             other_fail_reason: Optional[str] = None,
-            file_pages: Optional[int] = None,  # ✅ НОВОЕ
-            file_origin_size_kbytes: Optional[float] = None  # ✅ НОВОЕ
+            file_pages: Optional[int] = None,
+            file_origin_size_kbytes: Optional[float] = None
     ) -> ProcessedFile:
         # Нормализуем путь перед сохранением
         normalized_path = self.normalize_path(file_full_path)
+
+        # Проверяем существование записи прямо перед сохранением
+        existing = self.get_processed_file_by_path(normalized_path)
+        if existing:
+            print(f"⚠️ Запись уже существует для пути: {normalized_path}")
+            return existing
 
         processed_file = ProcessedFile(
             file_full_path=normalized_path,
@@ -47,13 +55,18 @@ class DBOperations:
             setting_id=setting_id,
             file_compression_kbites=file_compression_kbites,
             other_fail_reason=other_fail_reason,
-            file_pages=file_pages,  # ✅ НОВОЕ
-            file_origin_size_kbytes=file_origin_size_kbytes  # ✅ НОВОЕ
+            file_pages=file_pages,
+            file_origin_size_kbytes=file_origin_size_kbytes
         )
         self.db.add(processed_file)
-        self.db.commit()
-        self.db.refresh(processed_file)
-        return processed_file
+        try:
+            self.db.commit()
+            self.db.refresh(processed_file)
+            return processed_file
+        except Exception as e:
+            self.db.rollback()  # Важно! Откатываем транзакцию при ошибке
+            print(f"❌ Ошибка сохранения в БД: {e}")
+            raise
 
     # Операции с Setting
     def get_active_setting(self) -> Optional[Setting]:
@@ -271,17 +284,40 @@ class DBOperations:
             )
 
     def normalize_path(self, file_path: str) -> str:
-        """Нормализует путь для сравнения с учетом особенностей ОС"""
+        """
+        Улучшенная нормализация пути для сетевых и локальных путей
+        """
         try:
-            abs_path = os.path.abspath(file_path)
+            # Приводим к абсолютному пути, если это возможно
+            try:
+                abs_path = os.path.abspath(file_path)
+            except:
+                abs_path = file_path
+            
+            # Заменяем обратные слеши на прямые
             normalized = abs_path.replace('\\', '/')
-            if os.name == 'nt':
+            
+            # Для Windows путей (включая сетевые) приводим к нижнему регистру
+            if os.name == 'nt' or normalized.startswith('//'):
                 normalized = normalized.lower()
+            
+            # Удаляем лишние слеши в конце
             normalized = normalized.rstrip('/')
+            
+            # Нормализуем сетевые пути (//server/share -> //server/share)
+            if normalized.startswith('//') and not normalized.startswith('///'):
+                # Оставляем как есть, просто убираем лишние слеши
+                normalized = re.sub(r'/+', '/', normalized)
+            
+            # Убираем возможные дублирующиеся слеши
+            normalized = re.sub(r'/+', '/', normalized)
+            
             return normalized
+            
         except Exception as e:
             print(f"Ошибка нормализации пути {file_path}: {e}")
-            return file_path
+            # Возвращаем упрощенную версию в случае ошибки
+            return file_path.replace('\\', '/').lower()
 
     def normalize_existing_paths(self):
         """Нормализует пути в существующих записях и удаляет дубликаты"""

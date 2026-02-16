@@ -1,5 +1,7 @@
 # fix_duplicates.py
 
+
+# before executing this file (for file paths normalization in db table "processed_files")
 from models.database import get_db
 from crud.operations import DBOperations
 

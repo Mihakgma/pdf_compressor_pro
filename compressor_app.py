@@ -899,21 +899,42 @@ class PDFCompressor:
                     self.add_to_log("OCR недоступен. Установите Tesseract и зависимости.", "error")
                     return False, 0
                     
-                success = self.ocr_processor.process_with_tesseract(input_path, output_path)
+                try:
+                    success = self.ocr_processor.process_with_tesseract(input_path, output_path)
+                except MemoryError as e:
+                    self.add_to_log(f"❌ Недостаточно памяти для обработки {os.path.basename(input_path)}. Файл пропущен.", "error")
+                    return False, 0
+                except Exception as e:
+                    self.add_to_log(f"Ошибка OCR обработки: {e}", "error")
+                    return False, 0
                 
             elif method_id == 5:  # Tesseract + Ghostscript
                 if not self.ocr_available:
                     self.add_to_log("OCR недоступен. Установите Tesseract и зависимости.", "error")
                     return False, 0
                     
-                success = self.ocr_processor.process_with_tesseract_and_ghostscript(
-                    input_path, 
-                    output_path,
-                    self.compression_level.get()
-                )
+                try:
+                    success = self.ocr_processor.process_with_tesseract_and_ghostscript(
+                        input_path, 
+                        output_path,
+                        self.compression_level.get()
+                    )
+                except MemoryError as e:
+                    self.add_to_log(f"❌ Недостаточно памяти для обработки {os.path.basename(input_path)}. Файл пропущен.", "error")
+                    return False, 0
+                except Exception as e:
+                    self.add_to_log(f"Ошибка комбинированной обработки: {e}", "error")
+                    return False, 0
                 
             elif method_id in [1, 2, 3]:  # Стандартные методы Ghostscript
-                success = self.compress_with_ghostscript(input_path, output_path, self.compression_level.get())
+                try:
+                    success = self.compress_with_ghostscript(input_path, output_path, self.compression_level.get())
+                except MemoryError as e:
+                    self.add_to_log(f"❌ Недостаточно памяти для обработки {os.path.basename(input_path)}. Файл пропущен.", "error")
+                    return False, 0
+                except Exception as e:
+                    self.add_to_log(f"Ошибка сжатия Ghostscript: {e}", "error")
+                    return False, 0
                 
             else:
                 self.add_to_log(f"Неизвестный метод сжатия: {method_id}", "error")
@@ -1572,7 +1593,7 @@ class PDFCompressor:
             # Показываем лимит размера страницы
             border = self.kbytes_per_page_border.get()
             if border and border > 0:
-                self.add_to_log(f"Лимит размера страницы: {border} КБ/стр (файлы с превышением будут пропущены)", "info")
+                self.add_to_log(f"Лимит размера страницы: {border} КБ/стр (файлы со средним размером страницы менее указанного будут пропущены)", "info")
             else:
                 self.add_to_log("Лимит размера страницы: отключен", "info")
 

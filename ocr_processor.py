@@ -121,7 +121,7 @@ class OCRProcessor:
         return False
     
     def process_with_tesseract(self, input_path: str, output_path: str, dpi: int = 150, 
-                              languages: List[str] = None) -> bool:
+                            languages: List[str] = None) -> bool:
         """Обрабатывает PDF через Tesseract OCR"""
         if not self.ocr_available:
             self._safe_log("OCR недоступен. Установите зависимости и Tesseract.", "error")
@@ -150,7 +150,16 @@ class OCRProcessor:
             self._safe_log(f"Конвертация PDF в изображения (DPI: {dpi})...")
             start_time = datetime.datetime.now()
             
-            pages = convert_from_path(local_input, dpi=dpi)
+            try:
+                pages = convert_from_path(local_input, dpi=dpi)
+            except MemoryError as e:
+                self._safe_log(f"❌ Недостаточно памяти для конвертации PDF: {os.path.basename(input_path)}", "error")
+                self._safe_log("Файл слишком большой или содержит слишком много страниц для обработки с текущим DPI", "error")
+                return False
+            except Exception as e:
+                self._safe_log(f"Ошибка конвертации PDF: {e}", "error")
+                return False
+            
             conversion_time = (datetime.datetime.now() - start_time).total_seconds()
             
             self._safe_log(f"Получено {len(pages)} страниц за {conversion_time:.1f} секунд")
@@ -228,7 +237,7 @@ class OCRProcessor:
                     self._safe_log(f"Не удалось удалить временный файл {temp_file}: {e}", "warning")
     
     def process_with_tesseract_and_ghostscript(self, input_path: str, output_path: str, 
-                                              compression_level: int = 2) -> bool:
+                                            compression_level: int = 2) -> bool:
         """Комбинированная обработка: OCR + Ghostscript сжатие"""
         if not self.ocr_available:
             self._safe_log("OCR недоступен. Установите зависимости и Tesseract.", "error")
@@ -240,7 +249,11 @@ class OCRProcessor:
         try:
             # 1. OCR-обработка
             self._safe_log("Этап 1/2: OCR-обработка...")
-            ocr_success = self.process_with_tesseract(input_path, temp_ocr_pdf)
+            try:
+                ocr_success = self.process_with_tesseract(input_path, temp_ocr_pdf)
+            except MemoryError as e:
+                self._safe_log(f"❌ Недостаточно памяти на этапе OCR", "error")
+                return False
             
             if not ocr_success:
                 return False
@@ -301,6 +314,9 @@ class OCRProcessor:
                 
         except subprocess.TimeoutExpired:
             self._safe_log("Таймаут при сжатии Ghostscript (10 минут)", "error")
+            return False
+        except MemoryError as e:
+            self._safe_log(f"❌ Недостаточно памяти при комбинированной обработке", "error")
             return False
         except Exception as e:
             self._safe_log(f"Ошибка комбинированной обработки: {str(e)}", "error")
